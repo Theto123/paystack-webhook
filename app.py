@@ -6,7 +6,7 @@ import hmac
 app = Flask(__name__)
 
 BASE44_API_URL = "https://christravel.base44.app/api/functions/updateUserSubscription"
-PAYSTACK_SECRET = "YOUR_SECRET_KEY"
+PAYSTACK_SECRET = "sk_test_53bfe4e8394232ff2e9647ea5404b9ed9c9da729"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
