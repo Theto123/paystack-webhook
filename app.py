@@ -10,13 +10,10 @@ app = Flask(__name__)
 
 # Base44 API endpoint
 BASE44_API_URL = os.getenv("https://christravel.base44.app/api/functions/updateUserSubscription")
-if not BASE44_API_URL:
-    raise ValueError("BASE44_API_URL environment variable not set!")
 
 # Paystack secret key
 PAYSTACK_SECRET = os.getenv("sk_test_53bfe4e8394232ff2e9647ea5404b9ed9c9da729")
-if not PAYSTACK_SECRET:
-    raise ValueError("PAYSTACK_SECRET environment variable not set!")
+
 
 # -----------------------------
 # Verify Paystack signature
