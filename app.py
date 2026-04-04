@@ -1,120 +1,102 @@
 from flask import Flask, request, jsonify
+import os
 import requests
 import hashlib
 import hmac
-import os
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
 
 app = Flask(__name__)
 
+# Base44 API endpoint
 BASE44_API_URL = os.getenv("https://christravel.base44.app/api/functions/updateUserSubscription")
+if not BASE44_API_URL:
+    raise ValueError("BASE44_API_URL environment variable not set!")
+
+# Paystack secret key
 PAYSTACK_SECRET = os.getenv("sk_test_53bfe4e8394232ff2e9647ea5404b9ed9c9da729")
+if not PAYSTACK_SECRET:
+    raise ValueError("PAYSTACK_SECRET environment variable not set!")
 
-
-# 🔒 Verify Paystack signature
-def verify_signature(request_data, signature):
-    computed_hash = hmac.new(
+# -----------------------------
+# Verify Paystack signature
+# -----------------------------
+def verify_signature(payload, signature):
+    computed = hmac.new(
         PAYSTACK_SECRET.encode('utf-8'),
-        request_data,
+        payload,
         hashlib.sha512
     ).hexdigest()
-    return computed_hash == signature
+    return computed == signature
 
-
-# 📅 Calculate next billing date
-def calculate_next_payment(paid_at):
-    dt = datetime.fromisoformat(paid_at.replace("Z", ""))
-    return (dt + timedelta(days=30)).isoformat()
-
-
+# -----------------------------
+# Webhook route
+# -----------------------------
 @app.route('/webhook', methods=['POST'])
 def webhook():
     signature = request.headers.get('x-paystack-signature')
+    if not signature:
+        return jsonify({"error": "Missing signature header"}), 400
 
-    # 🔐 SECURITY
-    if not signature or not verify_signature(request.data, signature):
+    if not verify_signature(request.data, signature):
         return jsonify({"error": "Invalid signature"}), 400
 
-    data = request.json
+    # Parse payload
+    try:
+        data = request.json
+    except Exception:
+        return jsonify({"error": "Invalid JSON"}), 400
+
     event = data.get("event")
-    payload_data = data.get("data", {})
+    customer = data.get("data", {}).get("customer", {})
+    email = customer.get("email")
 
-    event_id = str(payload_data.get("id"))
-    email = payload_data.get("customer", {}).get("email")
+    if not event or not email:
+        return jsonify({"error": "Missing required data"}), 400
 
-    print(f"Event: {event} | Email: {email} | ID: {event_id}")
+    # -----------------------------
+    # Determine subscription status
+    # -----------------------------
+    # Default: ignore unrelated events
+    status = None
 
-    if not email:
-        return jsonify({"error": "Missing email"}), 400
+    if event in ["charge.success", "subscription.create", "subscription.activate"]:
+        status = "active"
+    elif event in ["subscription.disable", "invoice.payment_failed", "charge.failed"]:
+        status = "inactive"
+    elif event == "subscription.cancel":
+        # User cancelled manually
+        status = "inactive"
+    else:
+        # Ignore unrelated events
+        return jsonify({"message": f"Ignored event: {event}"}), 200
 
-    update_payload = {
+    # -----------------------------
+    # Prepare Base44 payload
+    # -----------------------------
+    payload = {
         "email": email,
-        "last_event_id": event_id
+        "subscription_status": status,
+        "last_payment_date": datetime.utcnow().isoformat() + "Z" if status == "active" else None
     }
 
-    # -------------------------
-    # ✅ SUCCESSFUL PAYMENT
-    # -------------------------
-    if event == "charge.success":
-
-        if payload_data.get("status") != "success":
-            return jsonify({"message": "Ignored"}), 200
-
-        paid_at = payload_data.get("paid_at")
-        plan_code = payload_data.get("plan", {}).get("plan_code")
-
-        next_payment_date = calculate_next_payment(paid_at)
-
-        update_payload.update({
-            "subscription_status": "active",
-            "plan_code": plan_code,
-            "last_payment_date": paid_at,
-            "next_payment_date": next_payment_date,
-            "cancel_at_period_end": False  # 🔥 reset cancel if user pays again
-        })
-
-    # -------------------------
-    # ✅ SUBSCRIPTION CREATED
-    # -------------------------
-    elif event == "subscription.create":
-
-        update_payload.update({
-            "subscription_code": payload_data.get("subscription_code"),
-            "plan_code": payload_data.get("plan", {}).get("plan_code"),
-            "email_token": payload_data.get("email_token"),
-            "cancel_at_period_end": False
-        })
-
-    # -------------------------
-    # ❌ PAYMENT FAILED
-    # -------------------------
-    elif event == "invoice.payment_failed":
-        return jsonify({"message": "Ignored (handled by expiry)"}), 200
-
-    # -------------------------
-    # ❌ SUBSCRIPTION CANCELLED
-    # -------------------------
-    elif event == "subscription.disable":
-
-        update_payload.update({
-            "cancel_at_period_end": True
-        })
-
-    else:
-        return jsonify({"message": "Ignored"}), 200
-
-    # -------------------------
-    # 📡 SEND TO BASE44
-    # -------------------------
+    # -----------------------------
+    # Send update to Base44
+    # -----------------------------
     try:
-        res = requests.post(BASE44_API_URL, json=update_payload, timeout=10)
-        print("Base44 response:", res.text)
-    except Exception as e:
-        print("Error:", str(e))
+        res = requests.post(BASE44_API_URL, json=payload, timeout=10)
+        res.raise_for_status()
+    except requests.RequestException as e:
+        # Log error and return 500 for Paystack retry
+        print("Error sending to Base44:", e)
         return jsonify({"error": "Failed to update Base44"}), 500
 
+    print(f"Webhook processed: {event} for {email} -> {status}")
     return jsonify({"message": "OK"}), 200
 
-
+# -----------------------------
+# Run server
+# -----------------------------
 if __name__ == '__main__':
-    app.run(port=5000)
+    port = int(os.getenv("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
